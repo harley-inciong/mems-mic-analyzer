@@ -1,0 +1,32 @@
+serial:
+  default_port: "COM3"
+  baud_rate: 921600
+  timeout: 0.1
+  packet_sync_byte1: 90  # 0x5A
+  packet_sync_byte2: 165 # 0xA5
+  payload_size_bytes: 512 # 256 samples * 2 bytes/sample (16-bit PCM)
+  buffer_duration_sec: 2.0 # Keep 2 seconds of audio history in memory
+
+audio:
+  default_sample_rate: 44100
+  sample_rates: [8000, 16000, 22050, 44100]
+  bits_per_sample: 16
+  channels: 1
+
+dsp:
+  default_fft_size: 1024
+  fft_sizes: [256, 512, 1024, 2048, 4096]
+  default_window: "hann"
+  windows: ["hamming", "hann", "blackman", "kaiser"]
+  clipping_threshold: 32000 # Near maximum of 32767 for int16
+  noise_gate_threshold: 0.005 # Normalized amplitude threshold
+  vad:
+    energy_threshold: 0.01
+    zcr_threshold: 0.15
+    smoothing_factor: 0.95
+    hangover_frames: 5
+
+ui:
+  default_theme: "Cyberpunk"
+  themes: ["Cyberpunk", "Ocean", "Emerald", "Dark", "Light"]
+  refresh_rate_ms: 100

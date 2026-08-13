@@ -319,8 +319,6 @@ class AudioDSP:
             metrics["harmonics"] = []
         
         return metrics
-        
-        return metrics
 
     @staticmethod
     def make_mel_filterbank(fs: float, n_fft: int, n_mels: int = 40) -> np.ndarray:

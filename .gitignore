@@ -44,8 +44,8 @@ ENV/
 env.bak/
 venv.bak/
 
-# Streamlit
-.streamlit/
+# Streamlit (keep config.toml, ignore secrets)
+.streamlit/secrets.toml
 
 # Visual Studio Code / JetBrains / IDEs
 .vscode/

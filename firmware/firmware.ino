@@ -1,5 +1,5 @@
 /**
- * Real-Time MEMS Microphone Analyzer - ESP32-C3 Firmware
+ * Real-Time MEMS Microphone Voice Recorder & Analyzer - ESP32-C3 Firmware
  * 
  * Hardware:
  *  - ESP32-C3 Development Board
@@ -13,19 +13,18 @@
  *  - INMP441 WS    -> ESP32-C3 GPIO 3 (Word Select / LRCK)
  *  - INMP441 SD    -> ESP32-C3 GPIO 1 (Serial Data Out / DOUT)
  * 
- * This firmware reads audio samples using DMA, packages them into a framed
- * packet protocol to avoid synchronization issues on the host, and streams
- * raw PCM over USB serial. It also handles commands from the host.
+ * Uses the native ESP32 Arduino Core 3.x <ESP_I2S.h> (i2s_std) driver
+ * configured for 32-bit Mono Left-slot Philips I2S capture with DC-offset
+ * removal and framed binary packet streaming over USB Serial.
  */
 
 #include <Arduino.h>
-#include <driver/i2s.h>
+#include <ESP_I2S.h>
 
 // Default I2S Pin Definitions for ESP32-C3 (GPIO 1, 2, 3 are adjacent and avoid RST/Pin 4)
 #define DEFAULT_I2S_SCK 2
 #define DEFAULT_I2S_WS  3
 #define DEFAULT_I2S_SD  1
-#define I2S_PORT I2S_NUM_0
 
 // Packet Framing Constants
 #define SYNC_BYTE_1 0x5A
@@ -33,19 +32,21 @@
 #define SAMPLES_PER_PACKET 256
 #define PAYLOAD_SIZE (SAMPLES_PER_PACKET * sizeof(int16_t)) // 512 bytes
 
-// Global variables
+// Global I2S instance and state
+I2SClass i2s;
 int i2sSckPin = DEFAULT_I2S_SCK;
 int i2sWsPin  = DEFAULT_I2S_WS;
 int i2sSdPin  = DEFAULT_I2S_SD;
-const int candidateSdPins[] = {1, 5, 6, 7, 10, 0};
-const int numCandidateSdPins = 6;
-int currentCandidateIdx = 0;
-int zeroPacketStreak = 0;
-bool sdSignalLocked = false;
 uint32_t currentSampleRate = 44100;
-float softwareGain = 2.0f;
+float softwareGain = 2.5f;
 bool isStreaming = true;
 uint8_t sequenceCounter = 0;
+
+// DC blocker filter state (removes INMP441 static DC offset)
+float dcPrevX = 0.0f;
+float dcPrevY = 0.0f;
+
+#include <driver/gpio.h>
 
 // DMA read buffers (stereo 32-bit slots: Left + Right per frame)
 int32_t i2sRawBuffer[SAMPLES_PER_PACKET * 2];
@@ -62,95 +63,60 @@ struct __attribute__((__packed__)) PacketHeader {
 };
 
 /**
- * Initializes or re-initializes the I2S peripheral with the specified sample rate.
+ * Initializes or re-initializes the ESP32-C3 I2S peripheral using the Core 3.x i2s_std driver.
  */
 bool initI2S(uint32_t sampleRate) {
-  // If driver is already installed, uninstall it first
-  i2s_driver_uninstall(I2S_PORT);
+  i2s.end();
 
-  // Configure I2S peripheral settings
-  // INMP441 outputs 24-bit data inside a 32-bit slot.
-  // Reading RIGHT_LEFT stereo slots avoids ESP32-C3 mono slot alignment bugs
-  // and automatically supports L/R wired to either GND (Left) or 3.3V (Right).
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = sampleRate,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = SAMPLES_PER_PACKET,
-    .use_apll = false,
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
-  };
+  // Set I2S pins: BCLK (SCK), WS (LRCK), DOUT (-1 unused), DIN (SD)
+  i2s.setPins(i2sSckPin, i2sWsPin, -1, i2sSdPin);
 
-  // Configure pins
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = i2sSckPin,
-    .ws_io_num = i2sWsPin,
-    .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = i2sSdPin
-  };
-
-  // Install driver
-  esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-  if (err != ESP_OK) {
+  // Initialize standard Philips I2S in 32-bit Stereo (Both Left & Right slots)
+  if (!i2s.begin(I2S_MODE_STD, sampleRate, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
     return false;
   }
 
-  // Assign pins
-  err = i2s_set_pin(I2S_PORT, &pin_config);
-  if (err != ESP_OK) {
-    return false;
-  }
+  // CRITICAL: Enable internal pull-down on SD *after* i2s.begin() because i2s_std_set_gpio()
+  // resets pull resistors. Pull-down holds the INMP441's tri-stated half-frame at 0 (no static!).
+  gpio_pullup_dis((gpio_num_t)i2sSdPin);
+  gpio_pulldown_en((gpio_num_t)i2sSdPin);
 
-  // Clear DMA buffer
-  i2s_zero_dma_buffer(I2S_PORT);
-  
   currentSampleRate = sampleRate;
+  dcPrevX = 0.0f;
+  dcPrevY = 0.0f;
   return true;
 }
 
 /**
- * Reads a line from the Serial port and executes commands.
+ * Non-blocking serial command parser.
  * Commands format:
  *   - "R:<rate>\n"         : Change sample rate (8000, 16000, 22050, 44100)
  *   - "G:<gain>\n"         : Change software digital gain multiplier (e.g. 1.0, 2.5)
  *   - "S:<1|0>\n"          : Start (1) or Stop (0) streaming
  *   - "P:<sck>,<ws>,<sd>\n": Reconfigure I2S GPIO pins dynamically
+ * Note: Does NOT print ASCII log strings into the serial stream while streaming binary audio.
  */
 void checkSerialCommands() {
-  if (Serial.available() > 0) {
+  while (Serial.available() > 0) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
-    
+    if (cmd.length() == 0) continue;
+
     if (cmd.startsWith("R:")) {
       long rate = cmd.substring(2).toInt();
       if (rate == 8000 || rate == 16000 || rate == 22050 || rate == 44100) {
-        if (initI2S(rate)) {
-          Serial.printf("LOG:Sample rate changed to %ld\n", rate);
-        } else {
-          Serial.println("ERR:Failed to set sample rate");
-        }
-      } else {
-        Serial.printf("ERR:Unsupported sample rate %ld\n", rate);
+        initI2S((uint32_t)rate);
       }
     } 
     else if (cmd.startsWith("G:")) {
       float gain = cmd.substring(2).toFloat();
-      if (gain >= 0.0f && gain <= 100.0f) {
+      if (gain >= 0.1f && gain <= 100.0f) {
         softwareGain = gain;
-        Serial.printf("LOG:Gain changed to %.2f\n", gain);
-      } else {
-        Serial.println("ERR:Invalid gain value");
       }
     } 
     else if (cmd.startsWith("S:")) {
       int val = cmd.substring(2).toInt();
       isStreaming = (val == 1);
-      Serial.printf("LOG:Streaming %s\n", isStreaming ? "ON" : "OFF");
     }
     else if (cmd.startsWith("P:")) {
       String pins = cmd.substring(2);
@@ -163,7 +129,6 @@ void checkSerialCommands() {
         i2sSckPin = newSck;
         i2sWsPin  = newWs;
         i2sSdPin  = newSd;
-        sdSignalLocked = true;
         initI2S(currentSampleRate);
       }
     }
@@ -171,102 +136,67 @@ void checkSerialCommands() {
 }
 
 void setup() {
-  // Set up high-speed hardware USB CDC / UART serial interface
   Serial.begin(921600);
-  
-  // Wait for serial to connect (helpful for debugging, but doesn't block forever)
+  Serial.setTimeout(5); // Fast 5ms timeout so command reads never stall DMA audio
+
   uint32_t startWait = millis();
-  while (!Serial && (millis() - startWait < 2000)) {
+  while (!Serial && (millis() - startWait < 1500)) {
     delay(10);
   }
 
-  Serial.println("LOG:MEMS Microphone Analyzer initializing...");
-
-  // Settle time for MEMS microphone powerup
-  delay(500);
+  // Settle time for INMP441 MEMS microphone powerup
+  delay(200);
 
   // Initialize I2S at default 44.1 kHz
-  if (initI2S(currentSampleRate)) {
-    Serial.println("LOG:I2S initialized successfully");
-  } else {
-    Serial.println("ERR:I2S initialization failed!");
-  }
+  initI2S(currentSampleRate);
 }
 
 void loop() {
-  // Check for commands from the dashboard app
   checkSerialCommands();
 
-  // If streaming is disabled, sleep a bit and return
   if (!isStreaming) {
-    delay(50);
+    delay(20);
     return;
   }
 
-  size_t bytesRead = 0;
-  // Read raw 32-bit sample frames from the ESP32 I2S DMA
-  esp_err_t result = i2s_read(I2S_PORT, 
-                              &i2sRawBuffer, 
-                              sizeof(i2sRawBuffer), 
-                              &bytesRead, 
-                              portMAX_DELAY);
+  // Read 256 stereo 32-bit frames (2048 bytes) from the INMP441
+  size_t bytesRead = i2s.readBytes((char*)i2sRawBuffer, sizeof(i2sRawBuffer));
 
-  if (result == ESP_OK && bytesRead > 0) {
+  if (bytesRead > 0) {
     int totalWords = bytesRead / sizeof(int32_t);
     int sampleCount = totalWords / 2;
     if (sampleCount > SAMPLES_PER_PACKET) {
       sampleCount = SAMPLES_PER_PACKET;
     }
-    
-    int32_t firstRaw = 0;
-    bool packetHasTransitions = false;
 
-    // Process and convert 32-bit stereo raw frames to mono 16-bit PCM
+    // Determine which stereo slot (0 = Left, 1 = Right) has the active microphone signal
+    // for the entire packet (never switch mid-packet on zero-crossings!)
+    int64_t energy0 = 0;
+    int64_t energy1 = 0;
     for (int i = 0; i < sampleCount; i++) {
-      // Pick whichever slot (Left or Right) contains active I2S data (ignoring constant 0 or constant -1 pullup)
-      int32_t ch0 = i2sRawBuffer[i * 2];
-      int32_t ch1 = i2sRawBuffer[i * 2 + 1];
-      int32_t rawSample = (ch0 != 0 && ch0 != -1) ? ch0 : ((ch1 != 0 && ch1 != -1) ? ch1 : 0);
+      energy0 += llabs((long long)(i2sRawBuffer[i * 2] >> 14));
+      energy1 += llabs((long long)(i2sRawBuffer[i * 2 + 1] >> 14));
+    }
+    int activeSlot = (energy0 >= energy1) ? 0 : 1;
 
-      if (i == 0) {
-        firstRaw = rawSample;
-      } else if (rawSample != firstRaw) {
-        packetHasTransitions = true;
-      }
+    for (int i = 0; i < sampleCount; i++) {
+      // INMP441 outputs 24-bit signed two's complement left-aligned in 32-bit word.
+      // Shifting right by 14 converts 24-bit speech dynamic range into clean 16-bit PCM range.
+      float x = (float)(i2sRawBuffer[i * 2 + activeSlot] >> 14);
 
-      // The INMP441 outputs a 24-bit word left-justified in a 32-bit buffer.
-      // Shifting right by 14 preserves extra voice dynamic range before clipping.
-      int32_t shifted = rawSample >> 14;
-      
-      // Apply software digital gain with clipping safety
-      float scaledVal = shifted * softwareGain;
+      // 1st-order high-pass DC blocking filter (removes mic DC bias & sub-20Hz thump)
+      float y = x - dcPrevX + 0.995f * dcPrevY;
+      dcPrevX = x;
+      dcPrevY = y;
+
+      // Apply software digital gain with hard-clipping protection
+      float scaledVal = y * softwareGain;
       if (scaledVal > 32767.0f) {
         audioPayload[i] = 32767;
       } else if (scaledVal < -32768.0f) {
         audioPayload[i] = -32768;
       } else {
         audioPayload[i] = (int16_t)scaledVal;
-      }
-    }
-
-    // Auto-scan candidate SD pins (GPIO 1, 5, 6, 7, 10, 0) only if no I2S data transitions are present
-    if (packetHasTransitions) {
-      sdSignalLocked = true;
-      zeroPacketStreak = 0;
-    } else if (!sdSignalLocked) {
-      zeroPacketStreak++;
-      if (zeroPacketStreak >= 30) {
-        zeroPacketStreak = 0;
-        currentCandidateIdx = (currentCandidateIdx + 1) % numCandidateSdPins;
-        i2sSdPin = candidateSdPins[currentCandidateIdx];
-        i2s_pin_config_t pin_config = {
-          .bck_io_num = i2sSckPin,
-          .ws_io_num = i2sWsPin,
-          .data_out_num = I2S_PIN_NO_CHANGE,
-          .data_in_num = i2sSdPin
-        };
-        i2s_set_pin(I2S_PORT, &pin_config);
-        i2s_zero_dma_buffer(I2S_PORT);
       }
     }
 
@@ -279,16 +209,13 @@ void loop() {
     header.timestamp = micros();
     header.sampleRate = currentSampleRate;
 
-    // Calculate CRC / XOR Checksum of header payload (excluding sync bytes)
+    // Calculate XOR Checksum of header (excluding sync bytes) + audio payload
     uint8_t checksum = 0;
-    
-    // Checksum header fields
     uint8_t* headerPtr = (uint8_t*)&header;
     for (size_t i = 2; i < sizeof(PacketHeader); i++) {
       checksum ^= headerPtr[i];
     }
-    
-    // Checksum audio payload
+
     uint8_t* payloadPtr = (uint8_t*)audioPayload;
     for (size_t i = 0; i < header.length; i++) {
       checksum ^= payloadPtr[i];

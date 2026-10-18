@@ -389,7 +389,9 @@ if sample_rate != st.session_state.reader.sample_rate:
     st.session_state.reader.send_sample_rate(sample_rate)
 
 hardware_gain = st.sidebar.slider("Microphone Gain Boost", 0.5, 15.0, 2.5, step=0.5)
-st.session_state.reader.send_gain(hardware_gain)
+if st.session_state.get("last_sent_gain") != hardware_gain:
+    st.session_state.reader.send_gain(hardware_gain)
+    st.session_state.last_sent_gain = hardware_gain
 
 # Dynamic I2S Pinout Configuration & Quick Reference
 with st.sidebar.expander("📌 INMP441 ↔ ESP32-C3 Pinout & Pins", expanded=True):
@@ -399,13 +401,13 @@ with st.sidebar.expander("📌 INMP441 ↔ ESP32-C3 Pinout & Pins", expanded=Tru
         | :--- | :--- | :--- |
         | **VDD** | **3.3V** | Power (Do NOT use 5V) |
         | **GND** | **GND** | Common Ground |
-        | **L/R** | **GND** (or 3.3V) | Channel Select |
+        | **L/R** | **GND** | Left Channel Select |
         | **SCK** | **GPIO 2** | Serial Clock (BCLK) |
         | **WS** | **GPIO 3** | Word Select (LRCK) |
         | **SD** | **GPIO 1** | Serial Data (DOUT) |
         """
     )
-    st.caption("Auto-detects SD on GPIO 1, 5, 6, 7, 10, 0 — or set manually:")
+    st.caption("Wired to different GPIOs? Set them manually:")
     p_col1, p_col2, p_col3 = st.columns(3)
     with p_col1:
         pin_sck = st.number_input("SCK", min_value=0, max_value=21, value=2, step=1)

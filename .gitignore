@@ -60,6 +60,8 @@ venv.bak/
 *.wav
 *.csv
 fft_snapshot.json
+recordings/
+
 
 # OS files
 Thumbs.db

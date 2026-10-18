@@ -70,3 +70,39 @@ class AudioUtils:
             "Magnitude": mags
         })
         return df.to_csv(index=False)
+
+    @staticmethod
+    def compute_waveform_preview(samples: np.ndarray, num_points: int = 120) -> List[float]:
+        """
+        Downsamples a recording into normalized envelope bars (0.0 to 1.0)
+        for fast rendering in a Voice Memos style recording list.
+        """
+        if len(samples) == 0:
+            return [0.0] * num_points
+        abs_samples = np.abs(samples.astype(np.float32)) / 32768.0
+        if len(abs_samples) < num_points:
+            padded = np.pad(abs_samples, (0, num_points - len(abs_samples)))
+            return np.clip(padded, 0.02, 1.0).tolist()
+        chunks = np.array_split(abs_samples, num_points)
+        peaks = [float(np.max(c)) if len(c) > 0 else 0.02 for c in chunks]
+        max_peak = max(peaks) if peaks else 1.0
+        if max_peak > 0:
+            peaks = [max(0.04, min(1.0, p / max(max_peak, 0.15))) for p in peaks]
+        return peaks
+
+    @staticmethod
+    def compute_audio_summary(samples: np.ndarray, sample_rate: int) -> Dict[str, Any]:
+        """Computes duration, RMS dBFS, and Peak dBFS for a recorded voice clip."""
+        if len(samples) == 0 or sample_rate <= 0:
+            return {"duration_sec": 0.0, "rms_dbfs": -96.0, "peak_dbfs": -96.0}
+        norm = samples.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(norm ** 2)))
+        peak = float(np.max(np.abs(norm)))
+        rms_db = 20.0 * np.log10(max(rms, 1e-5))
+        peak_db = 20.0 * np.log10(max(peak, 1e-5))
+        return {
+            "duration_sec": len(samples) / float(sample_rate),
+            "rms_dbfs": round(float(rms_db), 1),
+            "peak_dbfs": round(float(peak_db), 1),
+        }
+

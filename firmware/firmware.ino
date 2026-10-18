@@ -21,10 +21,10 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 
-// I2S Pin Definitions for ESP32-C3
-#define I2S_SCK 2
-#define I2S_WS  3
-#define I2S_SD  4
+// Default I2S Pin Definitions for ESP32-C3
+#define DEFAULT_I2S_SCK 2
+#define DEFAULT_I2S_WS  3
+#define DEFAULT_I2S_SD  4
 #define I2S_PORT I2S_NUM_0
 
 // Packet Framing Constants
@@ -34,13 +34,16 @@
 #define PAYLOAD_SIZE (SAMPLES_PER_PACKET * sizeof(int16_t)) // 512 bytes
 
 // Global variables
+int i2sSckPin = DEFAULT_I2S_SCK;
+int i2sWsPin  = DEFAULT_I2S_WS;
+int i2sSdPin  = DEFAULT_I2S_SD;
 uint32_t currentSampleRate = 44100;
-float softwareGain = 1.0f;
+float softwareGain = 2.0f;
 bool isStreaming = true;
 uint8_t sequenceCounter = 0;
 
-// DMA read buffers
-int32_t i2sRawBuffer[SAMPLES_PER_PACKET];
+// DMA read buffers (stereo 32-bit slots: Left + Right per frame)
+int32_t i2sRawBuffer[SAMPLES_PER_PACKET * 2];
 int16_t audioPayload[SAMPLES_PER_PACKET];
 
 // Struct representing the packet header
@@ -61,12 +64,14 @@ bool initI2S(uint32_t sampleRate) {
   i2s_driver_uninstall(I2S_PORT);
 
   // Configure I2S peripheral settings
-  // INMP441 outputs 24-bit data inside a 32-bit slot, so we read 32-bit samples.
+  // INMP441 outputs 24-bit data inside a 32-bit slot.
+  // Reading RIGHT_LEFT stereo slots avoids ESP32-C3 mono slot alignment bugs
+  // and automatically supports L/R wired to either GND (Left) or 3.3V (Right).
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = sampleRate,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // Single channel (mono)
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8,
@@ -78,10 +83,10 @@ bool initI2S(uint32_t sampleRate) {
 
   // Configure pins
   i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_SCK,
-    .ws_io_num = I2S_WS,
+    .bck_io_num = i2sSckPin,
+    .ws_io_num = i2sWsPin,
     .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = I2S_SD
+    .data_in_num = i2sSdPin
   };
 
   // Install driver
@@ -106,9 +111,10 @@ bool initI2S(uint32_t sampleRate) {
 /**
  * Reads a line from the Serial port and executes commands.
  * Commands format:
- *   - "R:<rate>\n" : Change sample rate (8000, 16000, 22050, 44100)
- *   - "G:<gain>\n" : Change software digital gain multiplier (e.g. 1.0, 2.5)
- *   - "S:<1|0>\n"  : Start (1) or Stop (0) streaming
+ *   - "R:<rate>\n"         : Change sample rate (8000, 16000, 22050, 44100)
+ *   - "G:<gain>\n"         : Change software digital gain multiplier (e.g. 1.0, 2.5)
+ *   - "S:<1|0>\n"          : Start (1) or Stop (0) streaming
+ *   - "P:<sck>,<ws>,<sd>\n": Reconfigure I2S GPIO pins dynamically
  */
 void checkSerialCommands() {
   if (Serial.available() > 0) {
@@ -140,6 +146,20 @@ void checkSerialCommands() {
       int val = cmd.substring(2).toInt();
       isStreaming = (val == 1);
       Serial.printf("LOG:Streaming %s\n", isStreaming ? "ON" : "OFF");
+    }
+    else if (cmd.startsWith("P:")) {
+      String pins = cmd.substring(2);
+      int c1 = pins.indexOf(',');
+      int c2 = pins.indexOf(',', c1 + 1);
+      if (c1 > 0 && c2 > c1) {
+        int newSck = pins.substring(0, c1).toInt();
+        int newWs  = pins.substring(c1 + 1, c2).toInt();
+        int newSd  = pins.substring(c2 + 1).toInt();
+        i2sSckPin = newSck;
+        i2sWsPin  = newWs;
+        i2sSdPin  = newSd;
+        initI2S(currentSampleRate);
+      }
     }
   }
 }
@@ -186,17 +206,25 @@ void loop() {
                               portMAX_DELAY);
 
   if (result == ESP_OK && bytesRead > 0) {
-    int sampleCount = bytesRead / sizeof(int32_t);
+    int totalWords = bytesRead / sizeof(int32_t);
+    int sampleCount = totalWords / 2;
+    if (sampleCount > SAMPLES_PER_PACKET) {
+      sampleCount = SAMPLES_PER_PACKET;
+    }
     
-    // Process and convert 32-bit raw values to 16-bit PCM
+    // Process and convert 32-bit stereo raw frames to mono 16-bit PCM
     for (int i = 0; i < sampleCount; i++) {
+      // Pick whichever slot (Left or Right) contains the active INMP441 data
+      int32_t ch0 = i2sRawBuffer[i * 2];
+      int32_t ch1 = i2sRawBuffer[i * 2 + 1];
+      int32_t rawSample = (ch0 != 0) ? ch0 : ch1;
+
       // The INMP441 outputs a 24-bit word left-justified in a 32-bit buffer.
-      // High 24 bits are audio data; shifting right by 16 yields a normal 16-bit signed int.
-      int32_t rawSample = i2sRawBuffer[i];
-      int16_t sample16 = (int16_t)(rawSample >> 16);
+      // Shifting right by 14 preserves extra voice dynamic range before clipping.
+      int32_t shifted = rawSample >> 14;
       
       // Apply software digital gain with clipping safety
-      float scaledVal = sample16 * softwareGain;
+      float scaledVal = shifted * softwareGain;
       if (scaledVal > 32767.0f) {
         audioPayload[i] = 32767;
       } else if (scaledVal < -32768.0f) {

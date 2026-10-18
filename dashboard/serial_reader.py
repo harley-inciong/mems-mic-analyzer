@@ -30,6 +30,13 @@ class SerialAudioReader:
         self.audio_buffer = deque(maxlen=self.max_samples)
         self.buffer_lock = threading.Lock()
         
+        # Continuous voice recording state
+        self.is_recording = False
+        self.is_recording_paused = False
+        self.recording_chunks: List[np.ndarray] = []
+        self.recording_sample_count = 0
+        self.recording_start_time: Optional[float] = None
+        
         # Command queue to send to ESP32
         self.command_queue = queue.Queue()
         
@@ -40,7 +47,7 @@ class SerialAudioReader:
         self.fps = 0.0
         self.latency_ms = 0.0
         self.last_seq: Optional[int] = None
-        self.firmware_version = "v1.0.0"
+        self.firmware_version = "v1.1.0"
         self.cpu_usage_est = 15.0 # Estimated firmware CPU usage
         
         # Serial port object
@@ -109,6 +116,10 @@ class SerialAudioReader:
         """Queues a gain change command to send to the ESP32."""
         self.command_queue.put(f"G:{gain:.2f}\n")
 
+    def send_pins(self, sck: int, ws: int, sd: int) -> None:
+        """Queues a dynamic I2S pin reconfiguration command to send to the ESP32."""
+        self.command_queue.put(f"P:{sck},{ws},{sd}\n")
+
     def get_audio_data(self, num_samples: int) -> np.ndarray:
         """
         Thread-safe retrieval of the latest N samples.
@@ -130,6 +141,69 @@ class SerialAudioReader:
             data_arr = np.pad(data_arr, (num_samples - len(data_arr), 0), 'constant')
             
         return data_arr
+
+    def start_recording(self) -> None:
+        """Starts capturing all incoming audio packets into an unbounded recording buffer."""
+        with self.buffer_lock:
+            self.recording_chunks = []
+            self.recording_sample_count = 0
+            self.is_recording = True
+            self.is_recording_paused = False
+            self.recording_start_time = time.time()
+
+    def pause_recording(self) -> None:
+        """Pauses active recording without discarding captured chunks."""
+        with self.buffer_lock:
+            if self.is_recording:
+                self.is_recording_paused = True
+
+    def resume_recording(self) -> None:
+        """Resumes a paused recording."""
+        with self.buffer_lock:
+            if self.is_recording:
+                self.is_recording_paused = False
+
+    def stop_recording(self) -> Tuple[np.ndarray, int, float]:
+        """
+        Stops recording and returns (samples_int16, sample_rate, duration_sec).
+        """
+        with self.buffer_lock:
+            self.is_recording = False
+            self.is_recording_paused = False
+            if self.recording_chunks:
+                samples = np.concatenate(self.recording_chunks).astype(np.int16)
+            else:
+                samples = np.array([], dtype=np.int16)
+            self.recording_chunks = []
+            self.recording_sample_count = 0
+            self.recording_start_time = None
+
+        duration_sec = len(samples) / float(self.sample_rate) if self.sample_rate > 0 else 0.0
+        return samples, self.sample_rate, duration_sec
+
+    def cancel_recording(self) -> None:
+        """Cancels and discards the current recording."""
+        with self.buffer_lock:
+            self.is_recording = False
+            self.is_recording_paused = False
+            self.recording_chunks = []
+            self.recording_sample_count = 0
+            self.recording_start_time = None
+
+    def get_recording_status(self) -> dict:
+        """Returns live recording status and duration."""
+        with self.buffer_lock:
+            samples = self.recording_sample_count
+            is_rec = self.is_recording
+            is_paused = self.is_recording_paused
+        duration_sec = samples / float(self.sample_rate) if self.sample_rate > 0 else 0.0
+        return {
+            "is_recording": is_rec,
+            "is_paused": is_paused,
+            "sample_count": samples,
+            "duration_sec": duration_sec,
+            "sample_rate": self.sample_rate
+        }
 
     def get_stats(self) -> dict:
         """Returns current serial connection and buffer statistics."""
@@ -249,6 +323,9 @@ class SerialAudioReader:
             # Push to buffer
             with self.buffer_lock:
                 self.audio_buffer.extend(audio_samples)
+                if self.is_recording and not self.is_recording_paused:
+                    self.recording_chunks.append(audio_samples.copy())
+                    self.recording_sample_count += len(audio_samples)
                 
             # Stats tracking
             self.packet_count += 1
@@ -360,6 +437,9 @@ class SerialAudioReader:
                 # Update buffer
                 with self.buffer_lock:
                     self.audio_buffer.extend(audio_samples)
+                    if self.is_recording and not self.is_recording_paused:
+                        self.recording_chunks.append(audio_samples.copy())
+                        self.recording_sample_count += len(audio_samples)
                 
                 # Sequence tracking & dropped packet check
                 if self.last_seq is not None:

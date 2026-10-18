@@ -15,6 +15,23 @@ class SerialAudioReader:
     Parses custom packet framing, calculates statistics, and updates a circular buffer.
     Includes a realistic Mock Mode for hardware-free development and demonstration.
     """
+    _shared_instance: Optional["SerialAudioReader"] = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get_shared_instance(cls, default_port: str = "MOCK") -> "SerialAudioReader":
+        """
+        Returns a process-wide singleton SerialAudioReader so multiple Streamlit
+        browser tabs or page refreshes never fight over the same Windows COM port.
+        """
+        with cls._instance_lock:
+            if cls._shared_instance is None:
+                cls._shared_instance = cls(port=default_port)
+                cls._shared_instance.start()
+            elif not cls._shared_instance.is_running:
+                cls._shared_instance.start()
+            return cls._shared_instance
+
     def __init__(self, port: str = "MOCK", baud_rate: int = 921600):
         self.port = port
         self.baud_rate = baud_rate
@@ -79,16 +96,24 @@ class SerialAudioReader:
         """Stops the background thread and closes serial connections."""
         self.is_running = False
         if self.thread:
-            self.thread.join(timeout=1.0)
+            self.thread.join(timeout=1.5)
             self.thread = None
         
         self._close_serial()
 
+    def reconnect(self) -> None:
+        """Force-closes and re-opens the current serial port."""
+        self.stop()
+        time.sleep(0.15)
+        self.connection_error = None
+        self.start()
+
     def set_port(self, port: str) -> None:
         """Dynamically switches serial port."""
-        if port != self.port:
+        if port != self.port or self.connection_error is not None:
             was_running = self.is_running
             self.stop()
+            time.sleep(0.15)
             self.port = port
             self.connection_error = None
             

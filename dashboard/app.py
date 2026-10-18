@@ -295,15 +295,17 @@ def inject_custom_css(theme_name: str):
 
 
 # ----------------------------------------------------
-# 3. Session State Initialization
+# 3. Shared Reader & Session State Initialization
 # ----------------------------------------------------
-if "reader" not in st.session_state:
+@st.cache_resource
+def get_shared_audio_reader() -> SerialAudioReader:
     ports = SerialAudioReader.list_available_ports()
-    # Automatically prefer a real hardware port (e.g. COM11) if detected and free
     hw_ports = [p for p in ports if p != "MOCK" and "COM6" not in p and "COM7" not in p]
     initial_port = hw_ports[0] if hw_ports else "MOCK"
-    st.session_state.reader = SerialAudioReader(port=initial_port)
-    st.session_state.reader.start()
+    return SerialAudioReader.get_shared_instance(default_port=initial_port)
+
+
+st.session_state.reader = get_shared_audio_reader()
 
 if "recordings" not in st.session_state:
     st.session_state.recordings = load_saved_recordings()
@@ -352,8 +354,14 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔌 Microphone Source")
 available_ports = SerialAudioReader.list_available_ports()
 
-if st.sidebar.button("🔄 Scan Serial Ports", width="stretch"):
-    st.rerun()
+port_btn_col1, port_btn_col2 = st.sidebar.columns(2)
+with port_btn_col1:
+    if st.button("🔄 Scan Ports", width="stretch"):
+        st.rerun()
+with port_btn_col2:
+    if st.button("🔌 Reconnect", width="stretch"):
+        st.session_state.reader.reconnect()
+        st.rerun()
 
 current_port_idx = (
     available_ports.index(st.session_state.reader.port)

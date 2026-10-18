@@ -321,29 +321,19 @@ class SerialAudioReader:
                     # Mock pre-gain changes, nothing to do
                     pass
             
-            # Generate synthetic signal
+            # Generate clean, static-free harmonic test tone (proper phase integration, no white noise hiss)
             t = self.mock_time + np.arange(samples_per_packet) * dt
             self.mock_time += samples_per_packet * dt
             
-            # Frequency modulation for a dynamic voice-like sweep
-            modulator = np.sin(2 * np.pi * 0.2 * t)  # 0.2 Hz modulation
-            f1 = self.mock_freq1 + 100.0 * modulator
-            f2 = self.mock_freq2 + 200.0 * np.cos(2 * np.pi * 0.1 * t)
-            
-            # Main tones (harmonics)
-            sig = 0.4 * np.sin(2 * np.pi * f1 * t) + 0.25 * np.sin(2 * np.pi * f2 * t)
-            
-            # Add occasional high-frequency spikes (e.g. click/key-tap simulation)
-            if int(t[0] * 2) % 4 == 0:  # Every 2 seconds
-                decay = np.exp(-100.0 * (t - t[0]))
-                sig += 0.3 * np.sin(2 * np.pi * 3000.0 * t) * decay
-                
-            # Add white noise
-            noise = np.random.normal(0, self.mock_noise_level, samples_per_packet)
-            sig += noise
+            envelope = 0.5 + 0.4 * np.sin(2 * np.pi * 1.5 * t)
+            sig = envelope * (
+                0.45 * np.sin(2 * np.pi * 440.0 * t)
+                + 0.25 * np.sin(2 * np.pi * 554.37 * t)
+                + 0.15 * np.sin(2 * np.pi * 659.25 * t)
+            )
             
             # Convert to signed 16-bit PCM integer range
-            audio_samples = (sig * 15000.0).astype(np.int16)
+            audio_samples = (sig * 14000.0).astype(np.int16)
             
             # Push to buffer
             with self.buffer_lock:

@@ -27,6 +27,26 @@ class AudioUtils:
         return wav_buffer.getvalue()
 
     @staticmethod
+    def parse_wav_bytes(wav_bytes: bytes):
+        """
+        Parses WAV bytes (e.g. from st.audio_input) into (mono_int16_samples, sample_rate).
+        """
+        with wave.open(io.BytesIO(wav_bytes), 'rb') as wf:
+            sr = wf.getframerate()
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            raw_frames = wf.readframes(wf.getnframes())
+            if sampwidth == 2:
+                samples = np.frombuffer(raw_frames, dtype=np.int16)
+            elif sampwidth == 4:
+                samples = (np.frombuffer(raw_frames, dtype=np.int32) >> 16).astype(np.int16)
+            else:
+                samples = ((np.frombuffer(raw_frames, dtype=np.uint8).astype(np.int16) - 128) * 256).astype(np.int16)
+            if n_channels > 1:
+                samples = samples[::n_channels]
+            return samples, sr
+
+    @staticmethod
     def export_measurements_csv(metrics: Dict[str, Any]) -> str:
         """
         Formats the current audio measurements into a CSV string.

@@ -516,141 +516,594 @@ def plot_saved_memo_sparkline(preview_bars: List[float], theme_colors: Dict[str,
     return fig
 
 
+import streamlit.components.v1 as components
+
+WEB_SERIAL_RECORDER_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: transparent;
+    color: #E0E0E0;
+  }
+  .ws-card {
+    background: linear-gradient(145deg, #1E1E1E, #121212);
+    border: 1px solid #2D2D2D;
+    border-radius: 18px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  }
+  .ws-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(142,142,147,0.15);
+    border: 1px solid #3A3A3C;
+    color: #D1D1D6;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .ws-status.connected {
+    background: rgba(0, 230, 118, 0.15);
+    border-color: #00E676;
+    color: #69F0AE;
+  }
+  .ws-status.recording {
+    background: rgba(255, 59, 48, 0.18);
+    border-color: #FF3B30;
+    color: #FF6961;
+  }
+  .ws-timer {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 48px;
+    font-weight: 700;
+    margin: 8px 0 4px 0;
+    color: #FFFFFF;
+  }
+  .ws-sub {
+    font-size: 12px;
+    color: #8E8E93;
+    margin-bottom: 12px;
+  }
+  canvas {
+    width: 100%;
+    height: 120px;
+    background: rgba(0,0,0,0.25);
+    border-radius: 12px;
+    margin-bottom: 14px;
+  }
+  .ws-controls {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  button {
+    cursor: pointer;
+    border-radius: 10px;
+    border: 1px solid #3A3A3C;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 600;
+    background: #2C2C2E;
+    color: #FFF;
+    transition: all 0.15s ease;
+  }
+  button:hover:not(:disabled) {
+    filter: brightness(1.15);
+  }
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .btn-connect {
+    background: #0A84FF;
+    border-color: #0A84FF;
+  }
+  .btn-rec {
+    background: #FF3B30;
+    border-color: #FF3B30;
+  }
+  .btn-stop {
+    background: #30D158;
+    border-color: #30D158;
+    color: #000;
+  }
+  .ws-list {
+    margin-top: 16px;
+    text-align: left;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  .ws-item {
+    background: #1C1C1E;
+    border: 1px solid #2C2C2E;
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .ws-item-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: #FFF;
+  }
+  .ws-item-meta {
+    font-size: 12px;
+    color: #8E8E93;
+  }
+  audio {
+    height: 36px;
+  }
+  a.dl-link {
+    text-decoration: none;
+    background: #2C2C2E;
+    color: #64D2FF;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid #3A3A3C;
+  }
+</style>
+</head>
+<body>
+<div class="ws-card">
+  <div id="statusBadge" class="ws-status">🔌 ESP32 USB Disconnected (Click Connect Below)</div>
+  <div id="timerDisplay" class="ws-timer">00:00.0</div>
+  <div id="levelDisplay" class="ws-sub">Connect your ESP32-C3 (COM11) directly via Chrome/Edge Web Serial — works on Streamlit Cloud & Local!</div>
+  <canvas id="waveCanvas" width="700" height="120"></canvas>
+  <div class="ws-controls">
+    <button id="btnConnect" class="btn-connect" onclick="toggleSerial()">🔌 Connect ESP32 USBPort (COM11)</button>
+    <input id="memoTitle" type="text" value="Voice Memo 1" style="background:#1C1C1E;color:#FFF;border:1px solid #3A3A3C;border-radius:10px;padding:8px 12px;font-size:14px;width:160px;" />
+    <button id="btnRec" class="btn-rec" onclick="startRec()" disabled>🔴 Start Recording</button>
+    <button id="btnPause" onclick="pauseRec()" disabled>⏸️ Pause</button>
+    <button id="btnStop" class="btn-stop" onclick="stopRec()" disabled>⏹️ Stop & Save</button>
+  </div>
+  <div id="recList" class="ws-list"></div>
+</div>
+
+<script>
+let port = null;
+let reader = null;
+let keepReading = false;
+let isRecording = false;
+let isPaused = false;
+let recordedSamples = [];
+let currentSampleRate = 44100;
+let recStartTime = 0;
+let memoCount = 1;
+let barHistory = new Array(70).fill(0.03);
+let packetCount = 0;
+
+const canvas = document.getElementById('waveCanvas');
+const ctx = canvas.getContext('2d');
+
+function drawBars() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const w = canvas.width;
+  const h = canvas.height;
+  const mid = h / 2;
+  const barW = (w / barHistory.length) * 0.62;
+  const gap = w / barHistory.length;
+
+  for (let i = 0; i < barHistory.length; i++) {
+    const val = Math.min(1.0, Math.max(0.03, barHistory[i]));
+    const bh = val * (mid - 8);
+    ctx.fillStyle = isRecording && !isPaused ? '#FF3B30' : '#BB86FC';
+    ctx.beginPath();
+    ctx.roundRect(i * gap + 2, mid - bh, barW, bh * 2, 3);
+    ctx.fill();
+  }
+  requestAnimationFrame(drawBars);
+}
+requestAnimationFrame(drawBars);
+
+function formatTimer(sec) {
+  const m = Math.floor(sec / 60).toString().padStart(2, '0');
+  const s = Math.floor(sec % 60).toString().padStart(2, '0');
+  const d = Math.floor((sec % 1) * 10);
+  return `${m}:${s}.${d}`;
+}
+
+async function toggleSerial() {
+  if (!('serial' in navigator)) {
+    alert('Web Serial API requires Google Chrome or Microsoft Edge.');
+    return;
+  }
+  if (port) {
+    keepReading = false;
+    if (reader) await reader.cancel();
+    await port.close();
+    port = null;
+    document.getElementById('statusBadge').className = 'ws-status';
+    document.getElementById('statusBadge').innerText = '🔌 ESP32 USB Disconnected';
+    document.getElementById('btnConnect').innerText = '🔌 Connect ESP32 USB Port (COM11)';
+    document.getElementById('btnRec').disabled = true;
+    return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 921600 });
+    keepReading = true;
+    document.getElementById('statusBadge').className = 'ws-status connected';
+    document.getElementById('statusBadge').innerText = '🟢 Connected to ESP32 USB (921600 baud)';
+    document.getElementById('btnConnect').innerText = '❌ Disconnect USB';
+    document.getElementById('btnRec').disabled = false;
+    readSerialLoop();
+  } catch (err) {
+    document.getElementById('levelDisplay').innerText = 'Connection cancelled or failed: ' + err.message;
+    port = null;
+  }
+}
+
+async function readSerialLoop() {
+  let buf = new Uint8Array(0);
+  while (port && port.readable && keepReading) {
+    reader = port.readable.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.length > 0) {
+          let merged = new Uint8Array(buf.length + value.length);
+          merged.set(buf);
+          merged.set(value, buf.length);
+          buf = parsePackets(merged);
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+}
+
+function parsePackets(buf) {
+  let offset = 0;
+  while (offset + 13 <= buf.length) {
+    if (buf[offset] !== 0x5A || buf[offset + 1] !== 0xA5) {
+      offset++;
+      continue;
+    }
+    const length = buf[offset + 3] | (buf[offset + 4] << 8);
+    if (length <= 0 || length > 2048) {
+      offset += 2;
+      continue;
+    }
+    const totalFrame = 13 + length + 1;
+    if (offset + totalFrame > buf.length) {
+      break; // Wait for more bytes
+    }
+    const sr = (buf[offset + 9]) | (buf[offset + 10] << 8) | (buf[offset + 11] << 16) | (buf[offset + 12] << 24);
+    if (sr >= 8000 && sr <= 48000) currentSampleRate = sr;
+
+    let peak = 0;
+    let sumSq = 0;
+    const count = length >> 1;
+    const payloadOffset = offset + 13;
+
+    for (let i = 0; i < count; i++) {
+      let s = buf[payloadOffset + i * 2] | (buf[payloadOffset + i * 2 + 1] << 8);
+      if (s & 0x8000) s = s - 0x10000;
+      const absS = Math.abs(s);
+      if (absS > peak) peak = absS;
+      sumSq += s * s;
+      if (isRecording && !isPaused) {
+        recordedSamples.push(s);
+      }
+    }
+
+    const normPeak = Math.min(1.0, peak / 16384.0);
+    barHistory.push(Math.max(0.03, normPeak));
+    if (barHistory.length > 70) barHistory.shift();
+
+    packetCount++;
+    if (packetCount % 10 === 0) {
+      const rms = Math.sqrt(sumSq / Math.max(1, count)) / 32768.0;
+      const db = (20 * Math.log10(Math.max(rms, 1e-5))).toFixed(1);
+      document.getElementById('levelDisplay').innerText =
+        `Live ESP32 Stream • ${currentSampleRate} Hz • Input RMS: ${db} dBFS • Peak PCM: ${peak}`;
+      if (isRecording) {
+        const dur = recordedSamples.length / currentSampleRate;
+        document.getElementById('timerDisplay').innerText = formatTimer(dur);
+      }
+    }
+
+    offset += totalFrame;
+  }
+  return buf.slice(offset);
+}
+
+function startRec() {
+  recordedSamples = [];
+  isRecording = true;
+  isPaused = false;
+  document.getElementById('statusBadge').className = 'ws-status recording';
+  document.getElementById('statusBadge').innerText = '● RECORDING LIVE FROM ESP32';
+  document.getElementById('btnRec').disabled = true;
+  document.getElementById('btnPause').disabled = false;
+  document.getElementById('btnStop').disabled = false;
+}
+
+function pauseRec() {
+  if (!isRecording) return;
+  isPaused = !isPaused;
+  document.getElementById('btnPause').innerText = isPaused ? '▶️ Resume' : '⏸️ Pause';
+  document.getElementById('statusBadge').innerText = isPaused ? '⏸ PAUSED' : '● RECORDING LIVE FROM ESP32';
+}
+
+function stopRec() {
+  if (!isRecording) return;
+  isRecording = false;
+  isPaused = false;
+  document.getElementById('statusBadge').className = 'ws-status connected';
+  document.getElementById('statusBadge').innerText = '🟢 Connected to ESP32 USB';
+  document.getElementById('btnRec').disabled = false;
+  document.getElementById('btnPause').disabled = true;
+  document.getElementById('btnStop').disabled = true;
+
+  if (recordedSamples.length === 0) return;
+
+  const wavBlob = encodeWAV(recordedSamples, currentSampleRate);
+  const url = URL.createObjectURL(wavBlob);
+  const dur = formatTimer(recordedSamples.length / currentSampleRate);
+  const titleInput = document.getElementById('memoTitle');
+  const title = titleInput.value.trim() || `Voice Memo ${memoCount}`;
+  memoCount++;
+  titleInput.value = `Voice Memo ${memoCount}`;
+  const nowStr = new Date().toLocaleTimeString();
+
+  const item = document.createElement('div');
+  item.className = 'ws-item';
+  item.innerHTML = `
+    <div>
+      <div class="ws-item-title">🎵 ${title} <span style="color:#64D2FF;font-size:12px;">(${dur})</span></div>
+      <div class="ws-item-meta">Recorded at ${nowStr} • ${currentSampleRate} Hz • ESP32 USB</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <audio controls src="${url}"></audio>
+      <a class="dl-link" href="${url}" download="${title.replace(/\\s+/g, '_')}.wav">💾 WAV</a>
+    </div>
+  `;
+  const list = document.getElementById('recList');
+  list.insertBefore(item, list.firstChild);
+}
+
+function encodeWAV(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    view.setInt16(offset, samples[i], true);
+  }
+  return new Blob([view], { type: 'audio/wav' });
+}
+</script>
+</body>
+</html>
+"""
+
 # ====================================================
 # MODE A: VOICE RECORDER APP (DEFAULT)
 # ====================================================
 if app_mode == "🎙️ Voice Recorder":
-    rec_status = st.session_state.reader.get_recording_status()
-    is_rec = rec_status["is_recording"]
-    is_rec_paused = rec_status["is_paused"]
-    rec_duration = rec_status["duration_sec"]
+    is_cloud_only_mock = len(available_ports) == 1 and available_ports[0] == "MOCK"
 
-    # Pull latest 1.5 seconds of audio for live waveform display
-    live_window_samples = st.session_state.reader.get_audio_data(int(sample_rate * 1.5))
-    live_summary = AudioUtils.compute_audio_summary(live_window_samples[-2048:], sample_rate)
-    live_peak_abs = int(np.max(np.abs(live_window_samples[-2048:]))) if len(live_window_samples) > 0 else 0
+    # Let user pick recording method clearly (especially helpful on Streamlit Cloud!)
+    rec_source_tabs = st.tabs([
+        "🔌 Local Serial Recorder (COM11)",
+        "🌐 Browser USB Web Serial (Cloud-Ready COM11)",
+        "🎤 Browser / PC Microphone",
+    ])
 
-    # Header Row with Source Status Badge
-    hdr_col1, hdr_col2 = st.columns([2.2, 1])
-    with hdr_col1:
-        st.markdown("## 🎙️ Voice Memos & Recorder")
-    with hdr_col2:
-        conn_badge = (
-            f"🟢 Hardware Mic ({stats['port']}) • {sample_rate // 1000:.1f} kHz"
-            if stats["connected"] and stats["port"] != "MOCK"
-            else f"🔵 Demo Synth ({stats['port']}) • {sample_rate // 1000:.1f} kHz"
-        )
+    # ----------------------------------------------------
+    # TAB 1: PYTHON SERIAL RECORDER (LOCALHOST COM11)
+    # ----------------------------------------------------
+    with rec_source_tabs[0]:
+        if is_cloud_only_mock:
+            st.info(
+                "☁️ **You are viewing the hosted Streamlit Cloud site.** Because Streamlit Cloud runs on a remote server, "
+                "Python's serial dropdown only sees `MOCK`. **To use your physical ESP32 (`COM11`) right here in the browser, "
+                "switch to the `🌐 Browser USB Web Serial (Cloud-Ready COM11)` tab above**, or open **http://localhost:8501** on your PC!"
+            )
+
+        rec_status = st.session_state.reader.get_recording_status()
+        is_rec = rec_status["is_recording"]
+        is_rec_paused = rec_status["is_paused"]
+        rec_duration = rec_status["duration_sec"]
+
+        live_window_samples = st.session_state.reader.get_audio_data(int(sample_rate * 1.5))
+        live_summary = AudioUtils.compute_audio_summary(live_window_samples[-2048:], sample_rate)
+        live_peak_abs = int(np.max(np.abs(live_window_samples[-2048:]))) if len(live_window_samples) > 0 else 0
+
+        hdr_col1, hdr_col2 = st.columns([2.2, 1])
+        with hdr_col1:
+            st.markdown("## 🎙️ Voice Memos & Recorder")
+        with hdr_col2:
+            conn_badge = (
+                f"🟢 Hardware Mic ({stats['port']}) • {sample_rate // 1000:.1f} kHz"
+                if stats["connected"] and stats["port"] != "MOCK"
+                else f"🧪 Demo Synth ({stats['port']}) • {sample_rate // 1000:.1f} kHz"
+            )
+            st.markdown(
+                f"<div style='text-align:right; padding-top:12px; font-size:13px; opacity:0.85;'>{conn_badge} | {stats['fps']:.0f} pkt/s</div>",
+                unsafe_allow_html=True,
+            )
+
+        if stats["connected"] and stats["port"] != "MOCK" and stats["packet_count"] > 20 and live_peak_abs == 0:
+            st.warning(
+                "⚠️ **ESP32 is connected on COM11 and streaming packets at 44.1 kHz, but the microphone data line (SD) is reading 0.** "
+                "Please check your INMP441 jumper wires: **VDD → 3.3V**, **GND → GND**, **L/R → GND**, **SCK → GPIO 2**, **WS → GPIO 3**, **SD → GPIO 1**."
+            )
+
+        if is_rec and not is_rec_paused:
+            pill_html = '<span class="status-pill-rec"><span class="rec-dot"></span> RECORDING LIVE</span>'
+        elif is_rec and is_rec_paused:
+            pill_html = '<span class="status-pill-paused">⏸ RECORDING PAUSED</span>'
+        else:
+            pill_html = '<span class="status-pill-ready">● READY TO RECORD</span>'
+
+        timer_str = format_timer(rec_duration if is_rec else 0.0)
+
         st.markdown(
-            f"<div style='text-align:right; padding-top:12px; font-size:13px; opacity:0.85;'>{conn_badge} | {stats['fps']:.0f} pkt/s</div>",
+            f"""
+            <div class="recorder-deck">
+                <div>{pill_html}</div>
+                <div class="timer-display">{timer_str}</div>
+                <div style="font-size: 13px; color: #8E8E93; margin-bottom: 4px;">
+                    Input Level: <b>{live_summary['rms_dbfs']:.1f} dBFS</b> &nbsp;•&nbsp;
+                    Peak: <b>{live_summary['peak_dbfs']:.1f} dBFS</b> &nbsp;•&nbsp;
+                    Source: <b>{stats['port']} ({sample_rate} Hz)</b>
+                </div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
-    # Hardware zero-signal hint if connected to COM port but receiving digital silence
-    if stats["connected"] and stats["port"] != "MOCK" and stats["packet_count"] > 20 and live_peak_abs == 0:
-        st.warning(
-            "⚠️ **ESP32 is connected and streaming packets at 44.1 kHz, but the microphone data line (SD) is reading 0.** "
-            "Please verify your INMP441 jumper wires: **VDD → 3.3V**, **GND → GND**, **L/R → GND**, **SCK → GPIO 2**, **WS → GPIO 3**, **SD → GPIO 1** "
-            "(avoiding the RST pin). Or adjust the GPIO numbers in the sidebar under *INMP441 ↔ ESP32-C3 Pinout*."
-        )
+        fig_live_bars = plot_voice_recorder_bars(live_window_samples, is_rec and not is_rec_paused, colors)
+        st.plotly_chart(fig_live_bars, width="stretch", config={"displayModeBar": False})
+
+        ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([1.6, 1.1, 1.1, 1.2])
+
+        with ctrl_col1:
+            memo_title_input = st.text_input(
+                "Recording Name",
+                value=st.session_state.next_memo_name,
+                label_visibility="collapsed",
+                placeholder="Enter recording name (e.g. Voice Memo 1)...",
+            )
+
+        if not is_rec:
+            with ctrl_col2:
+                if st.button("🔴 Start Recording", type="primary", width="stretch"):
+                    st.session_state.reader.start_recording()
+                    st.rerun()
+            with ctrl_col3:
+                if st.button("⚡ Quick 3s Clip", width="stretch", help="Instantly saves the last 3 seconds from buffer"):
+                    quick_samples = st.session_state.reader.get_audio_data(int(sample_rate * 3))
+                    entry = save_new_recording(
+                        quick_samples,
+                        sample_rate,
+                        memo_title_input or f"Voice Memo {len(st.session_state.recordings) + 1}",
+                        stats["port"],
+                    )
+                    st.session_state.selected_recording_id = entry["id"]
+                    st.session_state.next_memo_name = f"Voice Memo {len(st.session_state.recordings) + 1}"
+                    st.toast(f"Saved '{entry['title']}' ({entry['duration_sec']:.1f}s)!")
+                    st.rerun()
+            with ctrl_col4:
+                if st.button(
+                    "▶️ Resume Live Monitor" if st.session_state.is_paused else "⏸️ Pause Monitor",
+                    width="stretch",
+                ):
+                    st.session_state.is_paused = not st.session_state.is_paused
+                    st.rerun()
+        else:
+            with ctrl_col2:
+                if st.button("⏹️ Stop & Save", type="primary", width="stretch"):
+                    samples, sr, dur = st.session_state.reader.stop_recording()
+                    if len(samples) == 0:
+                        samples = st.session_state.reader.get_audio_data(int(sample_rate * 1.0))
+                    entry = save_new_recording(
+                        samples,
+                        sr,
+                        memo_title_input or f"Voice Memo {len(st.session_state.recordings) + 1}",
+                        stats["port"],
+                    )
+                    st.session_state.selected_recording_id = entry["id"]
+                    st.session_state.next_memo_name = f"Voice Memo {len(st.session_state.recordings) + 1}"
+                    st.toast(f"✅ Saved '{entry['title']}' ({entry['duration_sec']:.1f}s)")
+                    st.rerun()
+            with ctrl_col3:
+                if is_rec_paused:
+                    if st.button("▶️ Resume Rec", width="stretch"):
+                        st.session_state.reader.resume_recording()
+                        st.rerun()
+                else:
+                    if st.button("⏸️ Pause Rec", width="stretch"):
+                        st.session_state.reader.pause_recording()
+                        st.rerun()
+            with ctrl_col4:
+                if st.button("🗑️ Discard", width="stretch"):
+                    st.session_state.reader.cancel_recording()
+                    st.toast("Recording discarded.")
+                    st.rerun()
 
     # ----------------------------------------------------
-    # TOP SECTION: RECOGNIZABLE VOICE RECORDER STUDIO DECK
+    # TAB 2: WEB SERIAL RECORDER (WORKS ON STREAMLIT CLOUD!)
     # ----------------------------------------------------
-    if is_rec and not is_rec_paused:
-        pill_html = '<span class="status-pill-rec"><span class="rec-dot"></span> RECORDING LIVE</span>'
-    elif is_rec and is_rec_paused:
-        pill_html = '<span class="status-pill-paused">⏸ RECORDING PAUSED</span>'
-    else:
-        pill_html = '<span class="status-pill-ready">● READY TO RECORD</span>'
-
-    timer_str = format_timer(rec_duration if is_rec else 0.0)
-
-    st.markdown(
-        f"""
-        <div class="recorder-deck">
-            <div>{pill_html}</div>
-            <div class="timer-display">{timer_str}</div>
-            <div style="font-size: 13px; color: #8E8E93; margin-bottom: 4px;">
-                Input Level: <b>{live_summary['rms_dbfs']:.1f} dBFS</b> &nbsp;•&nbsp;
-                Peak: <b>{live_summary['peak_dbfs']:.1f} dBFS</b> &nbsp;•&nbsp;
-                Format: <b>16-bit PCM WAV ({sample_rate} Hz)</b>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Live Scrolling Voice Memos Waveform Bar Chart
-    fig_live_bars = plot_voice_recorder_bars(live_window_samples, is_rec and not is_rec_paused, colors)
-    st.plotly_chart(fig_live_bars, width="stretch", config={"displayModeBar": False})
-
-    # Transport Control Bar (Record / Pause / Stop & Save / Quick Record)
-    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([1.6, 1.1, 1.1, 1.2])
-
-    with ctrl_col1:
-        memo_title_input = st.text_input(
-            "Recording Name",
-            value=st.session_state.next_memo_name,
-            label_visibility="collapsed",
-            placeholder="Enter recording name (e.g. Voice Memo 1)...",
+    with rec_source_tabs[1]:
+        st.markdown("#### 🌐 Direct Browser USB Connection (`COM11` via Web Serial API)")
+        st.caption(
+            "Use this tab when opening the app on **Streamlit Cloud (`*.streamlit.app`)** in Chrome or Edge. "
+            "It connects your browser directly to your PC's `COM11` USB port without needing a local Python server!"
         )
+        components.html(WEB_SERIAL_RECORDER_HTML, height=580, scrolling=True)
 
-    if not is_rec:
-        with ctrl_col2:
-            if st.button("🔴 Start Recording", type="primary", width="stretch"):
-                st.session_state.reader.start_recording()
-                st.rerun()
-        with ctrl_col3:
-            if st.button("⚡ Quick 3s Clip", width="stretch", help="Instantly saves the last 3 seconds from buffer"):
-                quick_samples = st.session_state.reader.get_audio_data(int(sample_rate * 3))
-                entry = save_new_recording(
-                    quick_samples,
-                    sample_rate,
-                    memo_title_input or f"Voice Memo {len(st.session_state.recordings) + 1}",
-                    stats["port"],
-                )
-                st.session_state.selected_recording_id = entry["id"]
-                st.session_state.next_memo_name = f"Voice Memo {len(st.session_state.recordings) + 1}"
-                st.toast(f"Saved '{entry['title']}' ({entry['duration_sec']:.1f}s)!")
-                st.rerun()
-        with ctrl_col4:
-            if st.button(
-                "▶️ Resume Live Monitor" if st.session_state.is_paused else "⏸️ Pause Monitor",
-                width="stretch",
-            ):
-                st.session_state.is_paused = not st.session_state.is_paused
-                st.rerun()
-    else:
-        with ctrl_col2:
-            if st.button("⏹️ Stop & Save", type="primary", width="stretch"):
-                samples, sr, dur = st.session_state.reader.stop_recording()
-                if len(samples) == 0:
-                    # Fallback to latest buffer if stopped immediately
-                    samples = st.session_state.reader.get_audio_data(int(sample_rate * 1.0))
-                entry = save_new_recording(
-                    samples,
-                    sr,
-                    memo_title_input or f"Voice Memo {len(st.session_state.recordings) + 1}",
-                    stats["port"],
-                )
-                st.session_state.selected_recording_id = entry["id"]
-                st.session_state.next_memo_name = f"Voice Memo {len(st.session_state.recordings) + 1}"
-                st.toast(f"✅ Saved '{entry['title']}' ({entry['duration_sec']:.1f}s)")
-                st.rerun()
-        with ctrl_col3:
-            if is_rec_paused:
-                if st.button("▶️ Resume Rec", width="stretch"):
-                    st.session_state.reader.resume_recording()
-                    st.rerun()
-            else:
-                if st.button("⏸️ Pause Rec", width="stretch"):
-                    st.session_state.reader.pause_recording()
-                    st.rerun()
-        with ctrl_col4:
-            if st.button("🗑️ Discard", width="stretch"):
-                st.session_state.reader.cancel_recording()
-                st.toast("Recording discarded.")
-                st.rerun()
+    # ----------------------------------------------------
+    # TAB 3: BROWSER / PC MICROPHONE RECORDER
+    # ----------------------------------------------------
+    with rec_source_tabs[2]:
+        st.markdown("#### 🎤 Record from Browser / System Microphone")
+        st.caption("Record directly using your laptop, phone, or headset microphone and save to your recordings list below.")
+        b_col1, b_col2 = st.columns([1.5, 2.5])
+        with b_col1:
+            browser_memo_title = st.text_input(
+                "Browser Memo Name",
+                value=st.session_state.next_memo_name,
+                key="browser_memo_title_input",
+            )
+        with b_col2:
+            browser_audio = st.audio_input("Click microphone icon to record voice")
+            if browser_audio is not None:
+                raw_wav = browser_audio.getvalue()
+                last_saved_hash = st.session_state.get("last_browser_audio_len", 0)
+                if len(raw_wav) != last_saved_hash:
+                    st.session_state.last_browser_audio_len = len(raw_wav)
+                    try:
+                        pcm_samples, pcm_sr = AudioUtils.parse_wav_bytes(raw_wav)
+                        entry = save_new_recording(
+                            pcm_samples,
+                            pcm_sr,
+                            browser_memo_title or f"Voice Memo {len(st.session_state.recordings) + 1}",
+                            "Browser Mic",
+                        )
+                        st.session_state.next_memo_name = f"Voice Memo {len(st.session_state.recordings) + 1}"
+                        st.toast(f"✅ Saved '{entry['title']}' ({entry['duration_sec']:.1f}s) to Recordings List!")
+                    except Exception as ex:
+                        st.error(f"Could not parse browser audio: {ex}")
 
     st.markdown("---")
 

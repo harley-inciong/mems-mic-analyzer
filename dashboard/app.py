@@ -384,7 +384,7 @@ hardware_gain = st.sidebar.slider("Microphone Gain Boost", 0.5, 15.0, 2.5, step=
 st.session_state.reader.send_gain(hardware_gain)
 
 # Dynamic I2S Pinout Configuration & Quick Reference
-with st.sidebar.expander("📌 INMP441 ↔ ESP32-C3 Pinout & Pins", expanded=False):
+with st.sidebar.expander("📌 INMP441 ↔ ESP32-C3 Pinout & Pins", expanded=True):
     st.markdown(
         """
         | INMP441 Pin | ESP32-C3 Pin | Function |
@@ -394,17 +394,17 @@ with st.sidebar.expander("📌 INMP441 ↔ ESP32-C3 Pinout & Pins", expanded=Fal
         | **L/R** | **GND** (or 3.3V) | Channel Select |
         | **SCK** | **GPIO 2** | Serial Clock (BCLK) |
         | **WS** | **GPIO 3** | Word Select (LRCK) |
-        | **SD** | **GPIO 4** | Serial Data (DOUT) |
+        | **SD** | **GPIO 1** | Serial Data (DOUT) |
         """
     )
-    st.caption("Wired to different GPIOs? Update them live below:")
+    st.caption("Auto-detects SD on GPIO 1, 5, 6, 7, 10, 0 — or set manually:")
     p_col1, p_col2, p_col3 = st.columns(3)
     with p_col1:
         pin_sck = st.number_input("SCK", min_value=0, max_value=21, value=2, step=1)
     with p_col2:
         pin_ws = st.number_input("WS", min_value=0, max_value=21, value=3, step=1)
     with p_col3:
-        pin_sd = st.number_input("SD", min_value=0, max_value=21, value=4, step=1)
+        pin_sd = st.number_input("SD", min_value=0, max_value=21, value=1, step=1)
     if st.button("Apply GPIO Pins to ESP32", width="stretch"):
         st.session_state.reader.send_pins(int(pin_sck), int(pin_ws), int(pin_sd))
         st.toast(f"Updated ESP32 I2S pins: SCK={pin_sck}, WS={pin_ws}, SD={pin_sd}")
@@ -539,8 +539,8 @@ if app_mode == "🎙️ Voice Recorder":
     if stats["connected"] and stats["port"] != "MOCK" and stats["packet_count"] > 20 and live_peak_abs == 0:
         st.warning(
             "⚠️ **ESP32 is connected and streaming packets at 44.1 kHz, but the microphone data line (SD) is reading 0.** "
-            "Please verify your INMP441 jumper wires: **VDD → 3.3V**, **GND → GND**, **L/R → GND**, **SCK → GPIO 2**, **WS → GPIO 3**, **SD → GPIO 4** "
-            "(or adjust the GPIO numbers in the sidebar under *INMP441 ↔ ESP32-C3 Pinout*)."
+            "Please verify your INMP441 jumper wires: **VDD → 3.3V**, **GND → GND**, **L/R → GND**, **SCK → GPIO 2**, **WS → GPIO 3**, **SD → GPIO 1** "
+            "(avoiding the RST pin). Or adjust the GPIO numbers in the sidebar under *INMP441 ↔ ESP32-C3 Pinout*."
         )
 
     # ----------------------------------------------------

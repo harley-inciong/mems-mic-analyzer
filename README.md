@@ -43,10 +43,10 @@ The **INMP441** is an omnidirectional, digital I2S microphone. Connect it to the
 | :--- | :--- | :--- | :--- |
 | **VDD** | **3.3V** | Power | 1.6V to 3.6V supply voltage |
 | **GND** | **GND** | Ground | Common system ground |
-| **L/R** | **GND** | Channel select | Pull to GND for Left channel |
+| **L/R** | **GND** | Channel select | Pull to GND for Left channel (or 3.3V for Right) |
 | **SCK** | **GPIO 2** | Serial Clock | I2S Serial Data Clock (BCLK) |
 | **WS** | **GPIO 3** | Word Select | I2S Word Select (LRCK) |
-| **SD** | **GPIO 4** | Serial Data | I2S Serial Data Output |
+| **SD** | **GPIO 1** | Serial Data | I2S Serial Data Output (avoids RST/Pin 4; firmware also auto-scans GPIO 1, 5, 6, 7, 10, 0) |
 
 > [!IMPORTANT]
 > The **L/R** channel pin **MUST** be connected to **GND** so that the microphone outputs audio frames on the Left channel. Leaving it floating causes the ESP32 to receive empty buffers or continuous noise.

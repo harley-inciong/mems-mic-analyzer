@@ -5,13 +5,13 @@
  *  - ESP32-C3 Development Board
  *  - INMP441 MEMS Microphone
  * 
- * Connections:
+ * Connections (Revised to avoid RST / Pin 4):
  *  - INMP441 VDD   -> ESP32-C3 3.3V
  *  - INMP441 GND   -> ESP32-C3 GND
  *  - INMP441 L/R   -> ESP32-C3 GND (Left Channel)
  *  - INMP441 SCK   -> ESP32-C3 GPIO 2 (Serial Clock / BCLK)
  *  - INMP441 WS    -> ESP32-C3 GPIO 3 (Word Select / LRCK)
- *  - INMP441 SD    -> ESP32-C3 GPIO 4 (Serial Data Out)
+ *  - INMP441 SD    -> ESP32-C3 GPIO 1 (Serial Data Out / DOUT)
  * 
  * This firmware reads audio samples using DMA, packages them into a framed
  * packet protocol to avoid synchronization issues on the host, and streams
@@ -21,10 +21,10 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 
-// Default I2S Pin Definitions for ESP32-C3
+// Default I2S Pin Definitions for ESP32-C3 (GPIO 1, 2, 3 are adjacent and avoid RST/Pin 4)
 #define DEFAULT_I2S_SCK 2
 #define DEFAULT_I2S_WS  3
-#define DEFAULT_I2S_SD  4
+#define DEFAULT_I2S_SD  1
 #define I2S_PORT I2S_NUM_0
 
 // Packet Framing Constants
@@ -37,6 +37,11 @@
 int i2sSckPin = DEFAULT_I2S_SCK;
 int i2sWsPin  = DEFAULT_I2S_WS;
 int i2sSdPin  = DEFAULT_I2S_SD;
+const int candidateSdPins[] = {1, 5, 6, 7, 10, 0};
+const int numCandidateSdPins = 6;
+int currentCandidateIdx = 0;
+int zeroPacketStreak = 0;
+bool sdSignalLocked = false;
 uint32_t currentSampleRate = 44100;
 float softwareGain = 2.0f;
 bool isStreaming = true;
@@ -158,6 +163,7 @@ void checkSerialCommands() {
         i2sSckPin = newSck;
         i2sWsPin  = newWs;
         i2sSdPin  = newSd;
+        sdSignalLocked = true;
         initI2S(currentSampleRate);
       }
     }
@@ -212,12 +218,17 @@ void loop() {
       sampleCount = SAMPLES_PER_PACKET;
     }
     
+    bool packetHasNonZero = false;
+
     // Process and convert 32-bit stereo raw frames to mono 16-bit PCM
     for (int i = 0; i < sampleCount; i++) {
       // Pick whichever slot (Left or Right) contains the active INMP441 data
       int32_t ch0 = i2sRawBuffer[i * 2];
       int32_t ch1 = i2sRawBuffer[i * 2 + 1];
       int32_t rawSample = (ch0 != 0) ? ch0 : ch1;
+      if (rawSample != 0) {
+        packetHasNonZero = true;
+      }
 
       // The INMP441 outputs a 24-bit word left-justified in a 32-bit buffer.
       // Shifting right by 14 preserves extra voice dynamic range before clipping.
@@ -231,6 +242,27 @@ void loop() {
         audioPayload[i] = -32768;
       } else {
         audioPayload[i] = (int16_t)scaledVal;
+      }
+    }
+
+    // Auto-scan candidate SD pins (GPIO 1, 5, 6, 7, 10, 0) if reading pure digital 0
+    if (packetHasNonZero) {
+      sdSignalLocked = true;
+      zeroPacketStreak = 0;
+    } else if (!sdSignalLocked) {
+      zeroPacketStreak++;
+      if (zeroPacketStreak >= 40) {
+        zeroPacketStreak = 0;
+        currentCandidateIdx = (currentCandidateIdx + 1) % numCandidateSdPins;
+        i2sSdPin = candidateSdPins[currentCandidateIdx];
+        i2s_pin_config_t pin_config = {
+          .bck_io_num = i2sSckPin,
+          .ws_io_num = i2sWsPin,
+          .data_out_num = I2S_PIN_NO_CHANGE,
+          .data_in_num = i2sSdPin
+        };
+        i2s_set_pin(I2S_PORT, &pin_config);
+        i2s_zero_dma_buffer(I2S_PORT);
       }
     }
 

@@ -218,16 +218,20 @@ void loop() {
       sampleCount = SAMPLES_PER_PACKET;
     }
     
-    bool packetHasNonZero = false;
+    int32_t firstRaw = 0;
+    bool packetHasTransitions = false;
 
     // Process and convert 32-bit stereo raw frames to mono 16-bit PCM
     for (int i = 0; i < sampleCount; i++) {
-      // Pick whichever slot (Left or Right) contains the active INMP441 data
+      // Pick whichever slot (Left or Right) contains active I2S data (ignoring constant 0 or constant -1 pullup)
       int32_t ch0 = i2sRawBuffer[i * 2];
       int32_t ch1 = i2sRawBuffer[i * 2 + 1];
-      int32_t rawSample = (ch0 != 0) ? ch0 : ch1;
-      if (rawSample != 0) {
-        packetHasNonZero = true;
+      int32_t rawSample = (ch0 != 0 && ch0 != -1) ? ch0 : ((ch1 != 0 && ch1 != -1) ? ch1 : 0);
+
+      if (i == 0) {
+        firstRaw = rawSample;
+      } else if (rawSample != firstRaw) {
+        packetHasTransitions = true;
       }
 
       // The INMP441 outputs a 24-bit word left-justified in a 32-bit buffer.
@@ -245,13 +249,13 @@ void loop() {
       }
     }
 
-    // Auto-scan candidate SD pins (GPIO 1, 5, 6, 7, 10, 0) if reading pure digital 0
-    if (packetHasNonZero) {
+    // Auto-scan candidate SD pins (GPIO 1, 5, 6, 7, 10, 0) only if no I2S data transitions are present
+    if (packetHasTransitions) {
       sdSignalLocked = true;
       zeroPacketStreak = 0;
     } else if (!sdSignalLocked) {
       zeroPacketStreak++;
-      if (zeroPacketStreak >= 40) {
+      if (zeroPacketStreak >= 30) {
         zeroPacketStreak = 0;
         currentCandidateIdx = (currentCandidateIdx + 1) % numCandidateSdPins;
         i2sSdPin = candidateSdPins[currentCandidateIdx];
